@@ -83,8 +83,8 @@
 
 - `README.md`：功能、支持矩阵、工作原理、指标口径、构建运行、配置路径、电源管理、限制与路线图。
 - `RELEASE_NOTES.md`：v0.1.0（2026-10-24）首个公开预览版本的完整变更与已知问题。
-- Git 仓库已初始化，`.gitignore` 排除 `/src-tauri/target/` 与 `.DS_Store`；远程目标为 `https://github.com/Danson-dan/token-tracker.git`。
-- 当前网络无法直连 GitHub（443 超时），系统代理 127.0.0.1:7897 对外 HTTPS 也不通；推送需要在网络恢复后重试。
+- Git 仓库已初始化（`main`，首个提交 `bba75fe`），`.gitignore` 排除 `/src-tauri/target/`、`/src-tauri/gen/` 与 `.DS_Store`；远程已配置为 `https://github.com/Danson-dan/token-tracker.git`。
+- 推送阻塞：本机没有可用的 GitHub 凭据（无 credential helper、Keychain 无 github.com 条目、无 `gh`、无 `GITHUB_TOKEN`）；匿名 HTTPS 推送被 GitHub 拒绝，SSH 22 端口可连通但握手超时。需要在本地配置 PAT 或 SSH 后再执行 `git push -u origin main`。
 
 ## 下一步计划
 
