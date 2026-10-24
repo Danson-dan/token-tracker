@@ -2,7 +2,7 @@
 
 ## 当前在做什么
 
-2026-10-24：多智能体桌面悬浮窗已完成并实机验证（主窗、单工具小窗、电源设置）。目前 Claude Code、Codex CLI、ZCode 有可靠的 token 数据适配器，其余已安装/运行的工具先以“采集待适配”占位，不伪造数据。同日补齐 `README.md`、`RELEASE_NOTES.md`，并将项目初始化为 Git 仓库准备推送到 GitHub。
+2026-10-24：多智能体桌面悬浮窗已完成并实机验证（主窗、单工具小窗、电源设置）。目前 Claude Code、Codex CLI、ZCode 有可靠的 token 数据适配器，其余已安装/运行的工具先以“采集待适配”占位，不伪造数据。同日补齐 `README.md`、`RELEASE_NOTES.md`，并将项目初始化为 Git 仓库、推送到 GitHub `main`。
 
 ## 已完成什么
 
@@ -84,11 +84,12 @@
 - `README.md`：功能、支持矩阵、工作原理、指标口径、构建运行、配置路径、电源管理、限制与路线图。
 - `RELEASE_NOTES.md`：v0.1.0（2026-10-24）首个公开预览版本的完整变更与已知问题。
 - Git 仓库已初始化（`main`，首个提交 `bba75fe`），`.gitignore` 排除 `/src-tauri/target/`、`/src-tauri/gen/` 与 `.DS_Store`；远程已配置为 `https://github.com/Danson-dan/token-tracker.git`。
-- 推送阻塞：本机没有可用的 GitHub 凭据（无 credential helper、Keychain 无 github.com 条目、无 `gh`、无 `GITHUB_TOKEN`）；匿名 HTTPS 推送被 GitHub 拒绝，SSH 22 端口可连通但握手超时。需要在本地配置 PAT 或 SSH 后再执行 `git push -u origin main`。
+- 已推送到 GitHub `main`，远程 HEAD 与本地一致（`c1fb06c`）；后续提交直接 `git push`。
+- Fine-grained PAT 需要 Repository access 选中该仓库，并把 Contents 设为 Read and write；`Public repositories (read-only)` 只能读取，推送会返回 403。
 
 ## 下一步计划
 
-1. 网络恢复后完成 GitHub 首次推送，并确认远程默认分支为 `main`。
+1. 保持 `main` 与 `origin/main` 同步，功能变更完成后及时推送。
 2. 逐个确认其余工具的数据源结构，优先 WorkBuddy、CodeBuddy、Trae、Qoder。
 3. 如需要严格执行“打开后才记录”，在检测层记录首次运行时间，并按该时间过滤指标与图表。
 4. 为 5 个以上运行工具提供紧凑卡片布局或分组滚动提示。
