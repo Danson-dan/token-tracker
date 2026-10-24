@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<!--
+  @Author: Danson zheng
+  @Date: 2026-10-24
+  @Description: token-tracker 主界面与小窗共用页面；通过 ?tool=xxx&mini=1 进入单工具小窗，
+  只展示运行中的智能体，数据来自后端实时快照，不读取会话正文。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>模型生成速度</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="widget" id="widget">
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="brand" data-tauri-drag-region>
+          <span class="brand-mark" aria-hidden="true"></span>
+          <h1 id="titleText">模型生成速度</h1>
+          <span class="running-count" id="runningCount">0 个运行中</span>
+        </div>
+        <div class="titlebar-actions">
+          <div class="period-tabs" id="periodTabs" role="group" aria-label="统计周期">
+            <button class="period-tab is-active" type="button" data-period="today">今日</button>
+            <button class="period-tab" type="button" data-period="7d">7 天</button>
+            <button class="period-tab" type="button" data-period="30d">30 天</button>
+          </div>
+          <button class="icon-button" id="settingsButton" type="button" title="电源设置" aria-label="电源设置">
+            ⚙
+          </button>
+          <button class="icon-button" id="closeButton" type="button" title="退出应用" aria-label="退出应用">
+            ×
+          </button>
+        </div>
+      </header>
+
+      <section class="tool-grid" id="toolGrid" aria-label="运行中的智能体"></section>
+
+      <section class="empty-state" id="emptyState" hidden>
+        <strong id="emptyTitle">当前没有运行中的智能体</strong>
+        <span id="emptyHint">打开 Claude Code、Codex CLI、ZCode 等工具后，卡片会自动出现。</span>
+        <div class="installed-tools" id="installedTools"></div>
+      </section>
+
+      <section class="chart-panel" id="chartPanel" aria-label="近 30 分钟速度">
+        <div class="chart-head">
+          <span class="chart-title">近 30 分钟</span>
+          <span class="chart-legend" id="chartLegend"></span>
+          <span class="chart-peak">峰值 <strong id="peakRate">0</strong> tok/s</span>
+        </div>
+        <div class="chart" id="chart" aria-hidden="true">
+          <div class="chart-empty" id="chartEmpty">近 30 分钟暂无生成记录</div>
+        </div>
+        <div class="chart-axis" aria-hidden="true">
+          <span>30 分钟前</span>
+          <span>15 分钟前</span>
+          <span>现在</span>
+        </div>
+      </section>
+
+      <footer class="widget-footer">
+        <span class="privacy-note">仅统计 token 用量，不读取会话内容</span>
+        <span id="updatedAt">等待数据</span>
+      </footer>
+
+      <section class="settings-panel" id="settingsPanel" hidden>
+        <div class="settings-head">
+          <strong>空闲电源管理</strong>
+          <button class="icon-button" id="settingsCloseButton" type="button" aria-label="关闭设置">×</button>
+        </div>
+        <label class="settings-row settings-toggle">
+          <span>
+            <strong>所有任务完成后自动休眠/关机</strong>
+            <small>只有存在运行中的工具且持续无 token 产出时才计时</small>
+          </span>
+          <input type="checkbox" id="powerEnabled" />
+        </label>
+        <label class="settings-row">
+          <span>空闲分钟</span>
+          <input type="number" id="powerMinutes" min="1" max="1440" step="1" value="15" />
+        </label>
+        <label class="settings-row">
+          <span>执行动作</span>
+          <select id="powerAction">
+            <option value="sleep">系统休眠</option>
+            <option value="shutdown">自动关机</option>
+          </select>
+        </label>
+        <div class="settings-foot">
+          <span class="settings-status" id="settingsStatus"></span>
+          <button class="primary-button" id="saveSettings" type="button">保存</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="main.js"></script>
+  </body>
+</html>

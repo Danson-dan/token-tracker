@@ -1,0 +1,10 @@
+{
+  "identifier": "default",
+  "description": "主窗口与单工具小窗基础能力：拖动无边框窗口、关闭小窗",
+  "windows": ["main", "mini-*"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-close"
+  ]
+}
