@@ -84,7 +84,7 @@
 - `README.md`：功能、支持矩阵、工作原理、指标口径、构建运行、配置路径、电源管理、限制与路线图。
 - `RELEASE_NOTES.md`：v0.1.0（2026-10-24）首个公开预览版本的完整变更与已知问题。
 - Git 仓库已初始化（`main`，首个提交 `bba75fe`），`.gitignore` 排除 `/src-tauri/target/`、`/src-tauri/gen/` 与 `.DS_Store`；远程已配置为 `https://github.com/Danson-dan/token-tracker.git`。
-- 已推送到 GitHub `main`，远程 HEAD 与本地一致（`c1fb06c`）；后续提交直接 `git push`。
+- 已推送到 GitHub `main`，本地与远程保持同步；后续提交直接 `git push`。
 - Fine-grained PAT 需要 Repository access 选中该仓库，并把 Contents 设为 Read and write；`Public repositories (read-only)` 只能读取，推送会返回 403。
 
 ## 下一步计划
