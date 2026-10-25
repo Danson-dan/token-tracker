@@ -26,6 +26,16 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const THIRTY_DAY_SPAN: u64 = 30;
 const SEVEN_DAY_SPAN: u64 = 7;
 
+/// 工作状态：生成中、等待用户确认、已停止、无法判断
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkStatus {
+    Working,
+    NeedsConfirmation,
+    Stopped,
+    Idle,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsageEvent {
     pub tool: ToolId,
@@ -39,6 +49,15 @@ pub struct UsageEvent {
     pub duration_ms: u64,
 }
 
+/// 工具主动上报的工作状态；按任务保留最新一条，便于并发会话合并
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusEvent {
+    pub tool: ToolId,
+    pub task_id: u64,
+    pub at_ms: i64,
+    pub status: WorkStatus,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolSnapshot {
@@ -46,8 +65,14 @@ pub struct ToolSnapshot {
     pub display_name: String,
     pub short_name: String,
     pub accent: String,
-    /// 是否已有可靠的日志适配器；false 时界面显示待适配
+    /// 是否已有可靠的 token 日志适配器；false 时界面显示仅状态或待适配
     pub supported: bool,
+    /// 是否能从本地记录判断工作状态
+    pub status_supported: bool,
+    /// 当前工作状态
+    pub status: WorkStatus,
+    /// 当前状态对应的事件时间
+    pub status_at_ms: Option<i64>,
     /// 最近 60 秒完成事件的 token 总量 / 单任务生成耗时总量
     pub current_rate: f64,
     /// 最近 60 秒完成事件的 token 总量 / 并发活跃墙钟时间
@@ -114,6 +139,8 @@ pub struct LiveMetricsEngine {
     fixed_offset: Option<FixedOffset>,
     /// 每个工具按时间升序保存事件；至少保留 30 天窗口需要的数据
     events: HashMap<ToolId, Vec<UsageEvent>>,
+    /// 每个工具按任务保存最新状态，多个并发任务在快照时合并
+    statuses: HashMap<ToolId, HashMap<u64, StatusEvent>>,
 }
 
 impl Default for LiveMetricsEngine {
@@ -127,6 +154,7 @@ impl LiveMetricsEngine {
         Self {
             fixed_offset: None,
             events: HashMap::new(),
+            statuses: HashMap::new(),
         }
     }
 
@@ -135,6 +163,7 @@ impl LiveMetricsEngine {
         Self {
             fixed_offset: Some(offset),
             events: HashMap::new(),
+            statuses: HashMap::new(),
         }
     }
 
@@ -166,11 +195,43 @@ impl LiveMetricsEngine {
         }
     }
 
+    pub fn ingest_status(&mut self, event: StatusEvent) {
+        if event.at_ms < 0 || DateTime::<Utc>::from_timestamp_millis(event.at_ms).is_none() {
+            log::warn!(
+                "【实时指标】状态事件时间非法，已跳过 tool={} at_ms={}",
+                event.tool.display_name(),
+                event.at_ms
+            );
+            return;
+        }
+        let tasks = self.statuses.entry(event.tool).or_default();
+        let replace = tasks
+            .get(&event.task_id)
+            .is_none_or(|existing| existing.at_ms <= event.at_ms);
+        if replace {
+            tasks.insert(event.task_id, event);
+        }
+    }
+
+    pub fn ingest_all_status<I>(&mut self, events: I)
+    where
+        I: IntoIterator<Item = StatusEvent>,
+    {
+        for event in events {
+            self.ingest_status(event);
+        }
+    }
+
     pub fn snapshot_now(&mut self) -> LiveSnapshot {
         self.snapshot_at(Utc::now().timestamp_millis())
     }
 
     pub fn snapshot_at(&mut self, now_ms: i64) -> LiveSnapshot {
+        self.snapshot_at_with_running(now_ms, &[])
+    }
+
+    /// 结合进程运行列表生成快照；未运行的工具强制显示停止，避免沿用历史状态
+    pub fn snapshot_at_with_running(&mut self, now_ms: i64, running: &[ToolId]) -> LiveSnapshot {
         let Some(today) = self.local_date(now_ms) else {
             log::error!("【实时指标】快照时间戳非法，返回空快照 now_ms={now_ms}");
             return LiveSnapshot {
@@ -212,10 +273,18 @@ impl LiveMetricsEngine {
             if cut > 0 {
                 events.drain(..cut);
             }
+            let statuses = self.statuses.get(&tool);
+            let running_state = if running.is_empty() {
+                None
+            } else {
+                Some(running.contains(&tool))
+            };
 
             tools.push(build_tool_snapshot(
                 tool,
                 events,
+                statuses,
+                running_state,
                 now_ms,
                 day_start_ms,
                 seven_day_start_ms,
@@ -328,6 +397,8 @@ fn merged_duration_ms(intervals: &mut [(i64, i64)]) -> u64 {
 fn build_tool_snapshot(
     tool: ToolId,
     events: &[UsageEvent],
+    statuses: Option<&HashMap<u64, StatusEvent>>,
+    running_state: Option<bool>,
     now_ms: i64,
     day_start_ms: i64,
     seven_day_start_ms: i64,
@@ -389,6 +460,25 @@ fn build_tool_snapshot(
         .collect();
     let peak_rate_30m = minute_rates.iter().copied().fold(0.0, f64::max);
     let descriptor = tool.descriptor();
+    let explicit_active_tasks = statuses
+        .map(|map| {
+            map.values()
+                .filter(|event| {
+                    matches!(
+                        event.status,
+                        WorkStatus::Working | WorkStatus::NeedsConfirmation
+                    ) && now_ms.saturating_sub(event.at_ms) <= ACTIVE_TASK_WINDOW_MS
+                })
+                .count()
+        })
+        .unwrap_or_default();
+    let (status, status_at_ms) = derive_status(
+        statuses,
+        running_state,
+        latest,
+        active_tasks.len(),
+        now_ms,
+    );
 
     ToolSnapshot {
         tool,
@@ -396,6 +486,9 @@ fn build_tool_snapshot(
         short_name: descriptor.short_name.to_string(),
         accent: descriptor.accent.to_string(),
         supported: tool.is_supported(),
+        status_supported: tool.supports_status(),
+        status,
+        status_at_ms,
         current_rate: current.single_rate(),
         current_concurrent_rate: current.concurrent_rate(),
         latest_rate: latest
@@ -415,11 +508,77 @@ fn build_tool_snapshot(
         tasks_today: today.task_count(),
         tasks_7d: seven_day.task_count(),
         tasks_30d: thirty_day.task_count(),
-        active_tasks: active_tasks.len() as u32,
+        active_tasks: active_tasks.len().max(explicit_active_tasks) as u32,
         last_seen_ms: latest.map(|event| event.at_ms),
         peak_rate_30m,
         minute_rates,
     }
+}
+
+/// 合并同一工具的并发任务状态：需要确认优先，其次工作中，最后停止。
+/// 状态事件带时效，避免几个月前的 running 记录一直显示为工作中。
+fn derive_status(
+    statuses: Option<&HashMap<u64, StatusEvent>>,
+    running_state: Option<bool>,
+    latest: Option<UsageEvent>,
+    active_tasks: usize,
+    now_ms: i64,
+) -> (WorkStatus, Option<i64>) {
+    // 长生成或长工具执行可能数分钟没有新事件；5 分钟内容忍旧状态，避免误判停止
+    const WORKING_FRESH_MS: i64 = FIVE_MINUTE_WINDOW_MS;
+    const CONFIRM_FRESH_MS: i64 = 30 * 60_000;
+
+    if running_state == Some(false) {
+        let at = statuses
+            .and_then(|map| map.values().map(|event| event.at_ms).max())
+            .or_else(|| latest.map(|event| event.at_ms));
+        return (WorkStatus::Stopped, at);
+    }
+
+    let mut needs_confirmation: Option<i64> = None;
+    let mut working: Option<i64> = None;
+    let mut stopped: Option<i64> = None;
+
+    if let Some(map) = statuses {
+        for event in map.values() {
+            let age_ms = now_ms.saturating_sub(event.at_ms);
+            match event.status {
+                WorkStatus::NeedsConfirmation if age_ms <= CONFIRM_FRESH_MS => {
+                    needs_confirmation =
+                        Some(needs_confirmation.map_or(event.at_ms, |at| at.max(event.at_ms)));
+                }
+                WorkStatus::Working if age_ms <= WORKING_FRESH_MS => {
+                    working = Some(working.map_or(event.at_ms, |at| at.max(event.at_ms)));
+                }
+                WorkStatus::Stopped => {
+                    stopped = Some(stopped.map_or(event.at_ms, |at| at.max(event.at_ms)));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(at) = needs_confirmation {
+        return (WorkStatus::NeedsConfirmation, Some(at));
+    }
+    if let Some(at) = working {
+        return (WorkStatus::Working, Some(at));
+    }
+    if let Some(at) = stopped {
+        return (WorkStatus::Stopped, Some(at));
+    }
+
+    let last_status_at = statuses.and_then(|map| map.values().map(|event| event.at_ms).max());
+    let last_activity_at = latest.map(|event| event.at_ms).or(last_status_at);
+
+    // 没有显式状态时按最近 token 事件推断；仅状态工具在运行中也无法判断具体阶段
+    if active_tasks > 0 || latest.is_some_and(|event| now_ms - event.at_ms <= WORKING_FRESH_MS) {
+        return (WorkStatus::Working, last_activity_at);
+    }
+    if running_state == Some(true) {
+        return (WorkStatus::Idle, last_activity_at);
+    }
+    (WorkStatus::Idle, last_status_at)
 }
 
 fn tokens_per_second(tokens: u64, duration_ms: u64) -> f64 {
@@ -469,6 +628,15 @@ mod tests {
 
     fn usage(tool: ToolId, at_ms: i64, output_tokens: u64, duration_seconds: u64) -> UsageEvent {
         usage_in_task(tool, 1, at_ms, output_tokens, duration_seconds)
+    }
+
+    fn status_event(tool: ToolId, task_id: u64, at_ms: i64, status: WorkStatus) -> StatusEvent {
+        StatusEvent {
+            tool,
+            task_id,
+            at_ms,
+            status,
+        }
     }
 
     fn tool_snapshot<'a>(snapshot: &'a LiveSnapshot, tool: ToolId) -> &'a ToolSnapshot {
@@ -741,6 +909,73 @@ mod tests {
         let claude = tool_snapshot(&snapshot, ToolId::CLAUDE_CODE);
 
         assert_eq!(claude.active_tasks, 1);
+    }
+
+    #[test]
+    fn status_only_tasks_count_as_active_for_five_minutes() {
+        let now = local_ms(2026, 10, 23, 12, 0, 0);
+        let mut engine = engine();
+        engine.ingest_status(status_event(
+            ToolId::QODER_CN,
+            1,
+            now - 4 * 60_000,
+            WorkStatus::Working,
+        ));
+        engine.ingest_status(status_event(
+            ToolId::QODER_CN,
+            2,
+            now - 30_000,
+            WorkStatus::NeedsConfirmation,
+        ));
+        engine.ingest_status(status_event(
+            ToolId::QODER_CN,
+            3,
+            now - 6 * 60_000,
+            WorkStatus::Working,
+        ));
+
+        let snapshot = engine.snapshot_at_with_running(now, &[ToolId::QODER_CN]);
+        let qoder_cn = tool_snapshot(&snapshot, ToolId::QODER_CN);
+
+        assert_eq!(qoder_cn.status, WorkStatus::NeedsConfirmation);
+        assert_eq!(qoder_cn.active_tasks, 2);
+    }
+
+    #[test]
+    fn long_working_status_expires_to_idle_with_last_activity_time() {
+        let now = local_ms(2026, 10, 23, 12, 0, 0);
+        let working_at = now - 4 * 60_000;
+        let mut engine = engine();
+        engine.ingest_status(status_event(
+            ToolId::TRAE_CN,
+            1,
+            working_at,
+            WorkStatus::Working,
+        ));
+
+        let fresh = engine.snapshot_at_with_running(now, &[ToolId::TRAE_CN]);
+        let trae = tool_snapshot(&fresh, ToolId::TRAE_CN);
+        assert_eq!(trae.status, WorkStatus::Working);
+        assert_eq!(trae.status_at_ms, Some(working_at));
+        assert_eq!(trae.active_tasks, 1);
+
+        let stale = engine.snapshot_at_with_running(now + 2 * 60_000, &[ToolId::TRAE_CN]);
+        let trae = tool_snapshot(&stale, ToolId::TRAE_CN);
+        assert_eq!(trae.status, WorkStatus::Idle);
+        assert_eq!(trae.status_at_ms, Some(working_at));
+        assert_eq!(trae.active_tasks, 0);
+    }
+
+    #[test]
+    fn running_tool_without_status_records_is_idle_not_stopped() {
+        let now = local_ms(2026, 10, 23, 12, 0, 0);
+        let mut engine = engine();
+
+        let snapshot = engine.snapshot_at_with_running(now, &[ToolId::TRAE]);
+        let trae = tool_snapshot(&snapshot, ToolId::TRAE);
+
+        assert_eq!(trae.status, WorkStatus::Idle);
+        assert_eq!(trae.status_at_ms, None);
     }
 
     #[test]

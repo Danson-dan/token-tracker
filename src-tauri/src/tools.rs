@@ -7,18 +7,46 @@
 
 use serde::Serialize;
 
-/// 已支持的日志适配器；Unsupported 表示可以检测到工具，但尚无可靠 token 数据源
+/// 工具数据适配器。Token 源与状态源分开判断：
+/// Qoder CN / Trae / Trae CN 只能读到会话状态，OpenClaw/Gemini/ChatGPT/DeepSeek
+/// 目前没有本地 token 记录，这些工具仍然显示运行状态，但不会伪造 token 数据。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterKind {
     ClaudeCode,
     CodexCli,
     Zcode,
+    WorkBuddy,
+    CodeBuddy,
+    Grok,
+    Kimi,
+    Qoder,
+    QoderCn,
+    Hermes,
+    Trae,
+    StatusOnly,
     Unsupported,
 }
 
 impl AdapterKind {
-    pub fn is_supported(self) -> bool {
-        !matches!(self, Self::Unsupported)
+    /// 是否存在可解析的 token 记录
+    pub fn has_token_source(self) -> bool {
+        matches!(
+            self,
+            Self::ClaudeCode
+                | Self::CodexCli
+                | Self::Zcode
+                | Self::WorkBuddy
+                | Self::CodeBuddy
+                | Self::Grok
+                | Self::Kimi
+                | Self::Qoder
+                | Self::Hermes
+        )
+    }
+
+    /// 是否能从本地记录判断工作中/需要确认/停止
+    pub fn has_status_source(self) -> bool {
+        !matches!(self, Self::Unsupported | Self::StatusOnly)
     }
 }
 
@@ -33,7 +61,10 @@ impl ToolId {
     pub const WORK_BUDDY: Self = Self("workBuddy");
     pub const CODE_BUDDY: Self = Self("codeBuddy");
     pub const TRAE: Self = Self("trae");
+    pub const TRAE_CN: Self = Self("traeCn");
     pub const QODER: Self = Self("qoder");
+    pub const QODER_CN: Self = Self("qoderCn");
+    pub const DEEPSEEK_HARNESS: Self = Self("deepseekHarness");
     pub const GROK: Self = Self("grok");
     pub const OPEN_CLAW: Self = Self("openClaw");
     pub const HERMES: Self = Self("hermes");
@@ -41,20 +72,23 @@ impl ToolId {
     pub const KIMI_CODE: Self = Self("kimiCode");
     pub const CHATGPT: Self = Self("chatgpt");
 
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 16] = [
         Self::CLAUDE_CODE,
         Self::CODEX_CLI,
         Self::ZCODE,
         Self::WORK_BUDDY,
         Self::CODE_BUDDY,
         Self::TRAE,
+        Self::TRAE_CN,
         Self::QODER,
+        Self::QODER_CN,
         Self::GROK,
         Self::OPEN_CLAW,
         Self::HERMES,
         Self::GEMINI_CLI,
         Self::KIMI_CODE,
         Self::CHATGPT,
+        Self::DEEPSEEK_HARNESS,
     ];
 
     pub fn id(self) -> &'static str {
@@ -85,7 +119,11 @@ impl ToolId {
     }
 
     pub fn is_supported(self) -> bool {
-        self.adapter().is_supported()
+        self.adapter().has_token_source()
+    }
+
+    pub fn supports_status(self) -> bool {
+        self.adapter().has_status_source()
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
@@ -116,7 +154,7 @@ pub struct ToolDescriptor {
     pub adapter: AdapterKind,
 }
 
-pub static TOOLS: [ToolDescriptor; 13] = [
+pub static TOOLS: [ToolDescriptor; 16] = [
     ToolDescriptor {
         id: ToolId::CLAUDE_CODE,
         display_name: "Claude Code",
@@ -159,7 +197,7 @@ pub static TOOLS: [ToolDescriptor; 13] = [
         command_names: &["workbuddy"],
         app_bundles: &["WorkBuddy.app", "WorkBuddy AI.app"],
         data_dirs: &[".workbuddy"],
-        adapter: AdapterKind::Unsupported,
+        adapter: AdapterKind::WorkBuddy,
     },
     ToolDescriptor {
         id: ToolId::CODE_BUDDY,
@@ -170,18 +208,29 @@ pub static TOOLS: [ToolDescriptor; 13] = [
         command_names: &["codebuddy"],
         app_bundles: &["CodeBuddy.app", "CodeBuddy CN.app"],
         data_dirs: &[".codebuddy"],
-        adapter: AdapterKind::Unsupported,
+        adapter: AdapterKind::CodeBuddy,
     },
     ToolDescriptor {
         id: ToolId::TRAE,
         display_name: "Trae",
         short_name: "Trae",
         accent: "#60a5fa",
-        process_keywords: &["trae", "trae cn"],
+        process_keywords: &["trae"],
         command_names: &["trae"],
-        app_bundles: &["Trae.app", "Trae CN.app"],
-        data_dirs: &[".trae", ".trae-cn"],
-        adapter: AdapterKind::Unsupported,
+        app_bundles: &["Trae.app"],
+        data_dirs: &[".trae"],
+        adapter: AdapterKind::Trae,
+    },
+    ToolDescriptor {
+        id: ToolId::TRAE_CN,
+        display_name: "Trae CN",
+        short_name: "Trae CN",
+        accent: "#3b82f6",
+        process_keywords: &["trae cn"],
+        command_names: &["trae"],
+        app_bundles: &["Trae CN.app"],
+        data_dirs: &[".trae-cn"],
+        adapter: AdapterKind::Trae,
     },
     ToolDescriptor {
         id: ToolId::QODER,
@@ -192,7 +241,18 @@ pub static TOOLS: [ToolDescriptor; 13] = [
         command_names: &["qoder"],
         app_bundles: &["Qoder.app", "Qoder IDE.app"],
         data_dirs: &[".qoder"],
-        adapter: AdapterKind::Unsupported,
+        adapter: AdapterKind::Qoder,
+    },
+    ToolDescriptor {
+        id: ToolId::QODER_CN,
+        display_name: "Qoder CN",
+        short_name: "Qoder CN",
+        accent: "#a78bfa",
+        process_keywords: &["qoder cn", "qodercn"],
+        command_names: &["qoder"],
+        app_bundles: &["Qoder CN.app"],
+        data_dirs: &[".qoder-cn"],
+        adapter: AdapterKind::QoderCn,
     },
     ToolDescriptor {
         id: ToolId::GROK,
@@ -203,7 +263,7 @@ pub static TOOLS: [ToolDescriptor; 13] = [
         command_names: &["grok"],
         app_bundles: &[],
         data_dirs: &[".grok"],
-        adapter: AdapterKind::Unsupported,
+        adapter: AdapterKind::Grok,
     },
     ToolDescriptor {
         id: ToolId::OPEN_CLAW,
@@ -214,7 +274,7 @@ pub static TOOLS: [ToolDescriptor; 13] = [
         command_names: &["openclaw"],
         app_bundles: &[],
         data_dirs: &[".openclaw"],
-        adapter: AdapterKind::Unsupported,
+        adapter: AdapterKind::StatusOnly,
     },
     ToolDescriptor {
         id: ToolId::HERMES,
@@ -225,7 +285,7 @@ pub static TOOLS: [ToolDescriptor; 13] = [
         command_names: &["hermes"],
         app_bundles: &[],
         data_dirs: &[".hermes"],
-        adapter: AdapterKind::Unsupported,
+        adapter: AdapterKind::Hermes,
     },
     ToolDescriptor {
         id: ToolId::GEMINI_CLI,
@@ -236,7 +296,7 @@ pub static TOOLS: [ToolDescriptor; 13] = [
         command_names: &["gemini"],
         app_bundles: &[],
         data_dirs: &[".gemini"],
-        adapter: AdapterKind::Unsupported,
+        adapter: AdapterKind::StatusOnly,
     },
     ToolDescriptor {
         id: ToolId::KIMI_CODE,
@@ -247,7 +307,7 @@ pub static TOOLS: [ToolDescriptor; 13] = [
         command_names: &["kimi"],
         app_bundles: &[],
         data_dirs: &[".kimi-code"],
-        adapter: AdapterKind::Unsupported,
+        adapter: AdapterKind::Kimi,
     },
     ToolDescriptor {
         id: ToolId::CHATGPT,
@@ -258,7 +318,22 @@ pub static TOOLS: [ToolDescriptor; 13] = [
         command_names: &["chatgpt"],
         app_bundles: &["ChatGPT.app"],
         data_dirs: &[],
-        adapter: AdapterKind::Unsupported,
+        adapter: AdapterKind::StatusOnly,
+    },
+    ToolDescriptor {
+        id: ToolId::DEEPSEEK_HARNESS,
+        display_name: "DeepSeek Harness",
+        short_name: "DeepSeek",
+        accent: "#4d6bfe",
+        process_keywords: &["deepseek harness", "deepseek"],
+        command_names: &["deepseek"],
+        app_bundles: &["DeepSeek Harness.app"],
+        data_dirs: &[
+            "Library/Application Support/@deepseek-ai/dsh-desktop",
+            "AppData/Roaming/@deepseek-ai/dsh-desktop",
+            ".config/@deepseek-ai/dsh-desktop",
+        ],
+        adapter: AdapterKind::StatusOnly,
     },
 ];
 
@@ -290,11 +365,28 @@ mod tests {
     }
 
     #[test]
-    fn supported_adapters_cover_initial_sources() {
+    fn adapters_expose_token_and_status_capabilities_separately() {
         assert!(ToolId::CLAUDE_CODE.is_supported());
         assert!(ToolId::CODEX_CLI.is_supported());
         assert!(ToolId::ZCODE.is_supported());
-        assert!(!ToolId::WORK_BUDDY.is_supported());
+        assert!(ToolId::WORK_BUDDY.is_supported());
+        assert!(ToolId::CODE_BUDDY.is_supported());
+        assert!(ToolId::QODER.is_supported());
+        assert!(ToolId::HERMES.is_supported());
+        assert!(ToolId::KIMI_CODE.is_supported());
+        assert!(ToolId::GROK.is_supported());
+
+        assert!(!ToolId::TRAE.is_supported());
+        assert!(ToolId::TRAE.supports_status());
+        assert!(!ToolId::TRAE_CN.is_supported());
+        assert!(ToolId::TRAE_CN.supports_status());
+        assert!(!ToolId::QODER_CN.is_supported());
+        assert!(ToolId::QODER_CN.supports_status());
+        assert!(!ToolId::OPEN_CLAW.is_supported());
+        assert!(!ToolId::OPEN_CLAW.supports_status());
+        assert!(!ToolId::CHATGPT.is_supported());
+        assert!(!ToolId::DEEPSEEK_HARNESS.is_supported());
+        assert!(!ToolId::DEEPSEEK_HARNESS.supports_status());
     }
 
     #[test]

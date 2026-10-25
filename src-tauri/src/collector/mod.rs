@@ -1,22 +1,34 @@
 /**
  * @Author: Danson zheng
  * @Date: 2026-10-23
- * @Description: 多智能体会话日志采集层。发现 Claude Code / Codex CLI / ZCode 的 JSONL
- * 会话文件，增量读取新增行，按本地近 30 个自然日回填，并把解析结果送入实时指标引擎。
- * 只提取时间、token、耗时与会话标识，不读取或记录会话正文。
+ * @Description: 多智能体会话日志采集层。发现 Claude Code / Codex CLI / ZCode /
+ * WorkBuddy / CodeBuddy / Grok / Kimi Code 的日志文件，增量读取新增内容；
+ * 同时轮询 Qoder / Hermes / Trae 的 SQLite 数据，按本地近 30 个自然日回填。
+ * 只提取时间、token、耗时、状态与会话标识，不读取或记录会话正文。
  */
 
 mod claude;
 mod codex;
+mod grok;
+mod json_trace;
 mod jsonl;
+mod kimi;
+mod sqlite;
+mod trace;
 mod zcode;
 
-use crate::live::{LiveMetricsEngine, UsageEvent, CHART_WINDOW_MS, THIRTY_DAY_SPAN};
+use crate::live::{
+    LiveMetricsEngine, StatusEvent, UsageEvent, CHART_WINDOW_MS, THIRTY_DAY_SPAN,
+};
 use crate::tools::{AdapterKind, ToolId};
 use chrono::{DateTime, Days, FixedOffset, Local, TimeZone, Utc};
 use claude::ClaudeParser;
 use codex::CodexParser;
+use grok::GrokParser;
+use json_trace::JsonTraceCollector;
 use jsonl::JsonlTailer;
+use kimi::KimiParser;
+use sqlite::SqliteCollector;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
@@ -27,6 +39,27 @@ use zcode::ZcodeParser;
 
 /// 单轮轮询最多打印的解析失败明细，避免坏文件刷屏
 const MAX_LOGGED_FAILURES: usize = 5;
+
+/// 单行解析结果；同一行可能同时产生 token 事件和状态事件
+#[derive(Debug, Default)]
+pub struct ParseResult {
+    pub event: Option<UsageEvent>,
+    pub status: Option<StatusEvent>,
+}
+
+/// 一轮采集结果
+#[derive(Debug, Default)]
+pub struct CollectBatch {
+    pub events: Vec<UsageEvent>,
+    pub statuses: Vec<StatusEvent>,
+}
+
+impl CollectBatch {
+    fn extend(&mut self, other: CollectBatch) {
+        self.events.extend(other.events);
+        self.statuses.extend(other.statuses);
+    }
+}
 
 #[derive(Debug)]
 struct RootSpec {
@@ -45,28 +78,52 @@ enum FileParser {
     Claude(ClaudeParser),
     Codex(CodexParser),
     Zcode(ZcodeParser),
+    Grok(GrokParser),
+    Kimi(KimiParser),
 }
 
 impl FileParser {
-    /// 暂无可靠数据源的适配器返回 None，采集层跳过对应文件
+    /// 暂无线下 token 数据源的适配器返回 None，采集层跳过对应文件
     fn new(tool: ToolId) -> Option<Self> {
         match tool.adapter() {
             AdapterKind::ClaudeCode => Some(Self::Claude(ClaudeParser::new())),
             AdapterKind::CodexCli => Some(Self::Codex(CodexParser::new())),
             AdapterKind::Zcode => Some(Self::Zcode(ZcodeParser::new())),
-            AdapterKind::Unsupported => None,
+            AdapterKind::Grok => Some(Self::Grok(GrokParser::new())),
+            AdapterKind::Kimi => Some(Self::Kimi(KimiParser::new())),
+            AdapterKind::WorkBuddy
+            | AdapterKind::CodeBuddy
+            | AdapterKind::Qoder
+            | AdapterKind::QoderCn
+            | AdapterKind::Hermes
+            | AdapterKind::Trae
+            | AdapterKind::StatusOnly
+            | AdapterKind::Unsupported => None,
         }
     }
 
-    fn parse_line(
-        &mut self,
-        line: &str,
-        emit_after_ms: i64,
-    ) -> Result<Option<UsageEvent>, String> {
+    fn parse_line(&mut self, line: &str, emit_after_ms: i64) -> Result<ParseResult, String> {
         match self {
-            Self::Claude(parser) => parser.parse_line(line, emit_after_ms),
-            Self::Codex(parser) => parser.parse_line(line, emit_after_ms),
-            Self::Zcode(parser) => parser.parse_line(line, emit_after_ms),
+            Self::Claude(parser) => parser
+                .parse_line(line, emit_after_ms)
+                .map(|event| ParseResult {
+                    event,
+                    status: None,
+                }),
+            Self::Codex(parser) => parser
+                .parse_line(line, emit_after_ms)
+                .map(|event| ParseResult {
+                    event,
+                    status: None,
+                }),
+            Self::Zcode(parser) => parser
+                .parse_line(line, emit_after_ms)
+                .map(|event| ParseResult {
+                    event,
+                    status: None,
+                }),
+            Self::Grok(parser) => parser.parse_line(line, emit_after_ms),
+            Self::Kimi(parser) => parser.parse_line(line, emit_after_ms),
         }
     }
 }
@@ -84,6 +141,8 @@ pub struct LogCollector {
     roots: Vec<RootSpec>,
     offset: FixedOffset,
     tracked: HashMap<PathBuf, TrackedFile>,
+    json_traces: Vec<JsonTraceCollector>,
+    sqlite: Option<SqliteCollector>,
 }
 
 impl Default for LogCollector {
@@ -93,30 +152,43 @@ impl Default for LogCollector {
 }
 
 impl LogCollector {
-    /// 默认监听 Claude Code、Codex CLI、ZCode 的会话目录，时区跟随系统本地
+    /// 默认监听所有已适配工具的本地数据源，时区跟随系统本地
     pub fn new() -> Self {
         let mut roots = Vec::new();
+        let mut json_traces = Vec::new();
+        let sqlite = Some(SqliteCollector::new());
         match default_home_dir() {
             Some(home) => {
-                roots.push(RootSpec {
-                    path: home.join(".claude").join("projects"),
-                    tool: ToolId::CLAUDE_CODE,
-                });
-                roots.push(RootSpec {
-                    path: home.join(".codex").join("sessions"),
-                    tool: ToolId::CODEX_CLI,
-                });
-                roots.push(RootSpec {
-                    path: home.join(".zcode").join("cli").join("rollout"),
-                    tool: ToolId::ZCODE,
-                });
+                for (path, tool) in [
+                    (home.join(".claude").join("projects"), ToolId::CLAUDE_CODE),
+                    (home.join(".codex").join("sessions"), ToolId::CODEX_CLI),
+                    (
+                        home.join(".zcode").join("cli").join("rollout"),
+                        ToolId::ZCODE,
+                    ),
+                    (home.join(".grok").join("sessions"), ToolId::GROK),
+                    (
+                        home.join(".kimi-code").join("server").join("events"),
+                        ToolId::KIMI_CODE,
+                    ),
+                ] {
+                    roots.push(RootSpec { path, tool });
+                }
+                json_traces.push(JsonTraceCollector::new(
+                    ToolId::WORK_BUDDY,
+                    home.join(".workbuddy").join("traces"),
+                ));
+                json_traces.push(JsonTraceCollector::new(
+                    ToolId::CODE_BUDDY,
+                    home.join(".codebuddy").join("traces"),
+                ));
             }
             None => {
                 log::warn!("【日志采集】无法定位用户主目录，自动采集已禁用");
             }
         }
 
-        Self::with_specs(roots, *Local::now().offset())
+        Self::with_specs(roots, json_traces, sqlite, *Local::now().offset())
     }
 
     /// 显式指定日志根目录与时区，供测试或自定义部署使用
@@ -141,15 +213,24 @@ impl LogCollector {
                     tool: ToolId::ZCODE,
                 },
             ],
+            Vec::new(),
+            None,
             offset,
         )
     }
 
-    fn with_specs(roots: Vec<RootSpec>, offset: FixedOffset) -> Self {
+    fn with_specs(
+        roots: Vec<RootSpec>,
+        json_traces: Vec<JsonTraceCollector>,
+        sqlite: Option<SqliteCollector>,
+        offset: FixedOffset,
+    ) -> Self {
         let collector = Self {
             roots,
             offset,
             tracked: HashMap::new(),
+            json_traces,
+            sqlite,
         };
         for root in &collector.roots {
             if !root.path.is_dir() {
@@ -163,16 +244,17 @@ impl LogCollector {
     }
 
     /// 采集本轮新增事件；回填范围覆盖本地近 30 个自然日
-    pub fn poll(&mut self, now_ms: i64) -> Vec<UsageEvent> {
+    pub fn poll(&mut self, now_ms: i64) -> CollectBatch {
         let cutoff_ms = self.backfill_cutoff_ms(now_ms);
-        self.poll_after(cutoff_ms)
+        self.poll_after(cutoff_ms, now_ms)
     }
 
     /// 采集并直接写入实时引擎，返回本轮新增事件数
     pub fn poll_into(&mut self, engine: &mut LiveMetricsEngine, now_ms: i64) -> usize {
-        let events = self.poll(now_ms);
-        let count = events.len();
-        engine.ingest_all(events);
+        let batch = self.poll(now_ms);
+        let count = batch.events.len();
+        engine.ingest_all(batch.events);
+        engine.ingest_all_status(batch.statuses);
         count
     }
 
@@ -199,11 +281,11 @@ impl LogCollector {
             .unwrap_or(chart_start_ms)
     }
 
-    fn poll_after(&mut self, cutoff_ms: i64) -> Vec<UsageEvent> {
+    fn poll_after(&mut self, cutoff_ms: i64, now_ms: i64) -> CollectBatch {
         self.discover(cutoff_ms);
 
         let paths: Vec<PathBuf> = self.tracked.keys().cloned().collect();
-        let mut events = Vec::new();
+        let mut batch = CollectBatch::default();
         let mut line_count = 0usize;
         let mut failure_count = 0usize;
         let mut failures = Vec::new();
@@ -214,7 +296,7 @@ impl LogCollector {
                 None => continue,
             };
 
-            let batch = match read_result {
+            let read = match read_result {
                 Ok(batch) => batch,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     self.tracked.remove(&path);
@@ -237,7 +319,7 @@ impl LogCollector {
             let Some(tracked) = self.tracked.get_mut(&path) else {
                 continue;
             };
-            if batch.truncated {
+            if read.truncated {
                 if let Some(parser) = FileParser::new(tracked.tool) {
                     tracked.parser = parser;
                 }
@@ -247,14 +329,19 @@ impl LogCollector {
                 );
             }
 
-            for (line_no, line) in batch.lines {
+            for (line_no, line) in read.lines {
                 line_count += 1;
                 match tracked.parser.parse_line(&line, cutoff_ms) {
-                    Ok(Some(mut event)) => {
-                        event.task_id = tracked.task_id;
-                        events.push(event);
+                    Ok(result) => {
+                        if let Some(mut event) = result.event {
+                            event.task_id = tracked.task_id;
+                            batch.events.push(event);
+                        }
+                        if let Some(mut status) = result.status {
+                            status.task_id = tracked.task_id;
+                            batch.statuses.push(status);
+                        }
                     }
-                    Ok(None) => {}
                     Err(reason) => {
                         failure_count += 1;
                         if failures.len() < MAX_LOGGED_FAILURES {
@@ -263,6 +350,13 @@ impl LogCollector {
                     }
                 }
             }
+        }
+
+        for json_trace in &mut self.json_traces {
+            batch.extend(json_trace.poll(cutoff_ms));
+        }
+        if let Some(sqlite) = &mut self.sqlite {
+            batch.extend(sqlite.poll(now_ms, cutoff_ms));
         }
 
         for (path, line_no, reason) in &failures {
@@ -280,16 +374,17 @@ impl LogCollector {
             );
         }
 
-        if !events.is_empty() {
+        if !batch.events.is_empty() || !batch.statuses.is_empty() {
             log::info!(
-                "【日志采集】本轮采集完成 events={} lines={} tracked_files={}",
-                events.len(),
+                "【日志采集】本轮采集完成 events={} statuses={} lines={} tracked_files={}",
+                batch.events.len(),
+                batch.statuses.len(),
                 line_count,
                 self.tracked.len()
             );
         }
 
-        events
+        batch
     }
 
     fn discover(&mut self, cutoff_ms: i64) {
@@ -336,9 +431,16 @@ impl LogCollector {
 }
 
 /// 由绝对路径派生任务标识；同一会话文件在进程内始终对应同一任务
-fn task_id_for(path: &Path) -> u64 {
+pub(crate) fn task_id_for(path: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
+    hasher.finish().max(1)
+}
+
+/// 由会话或 trace 标识派生任务标识，供无法依赖文件路径的解析器使用
+pub(crate) fn task_id_for_text(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
     hasher.finish().max(1)
 }
 
@@ -462,7 +564,8 @@ mod tests {
         write_file(&zcode_file, ZCODE_FIXTURE);
 
         let mut collector = collector_at(&root);
-        let events = collector.poll_after(0);
+        let batch = collector.poll_after(0, 0);
+        let events = batch.events;
         assert_eq!(events.len(), 3);
 
         let claude = events
@@ -500,8 +603,8 @@ mod tests {
         write_file(&claude_file, CLAUDE_FIXTURE);
 
         let mut collector = collector_at(&root);
-        assert_eq!(collector.poll_after(0).len(), 1);
-        assert!(collector.poll_after(0).is_empty());
+        assert_eq!(collector.poll_after(0, 0).events.len(), 1);
+        assert!(collector.poll_after(0, 0).events.is_empty());
 
         let next_user = "{\"type\":\"user\",\"timestamp\":\"2026-10-23T03:00:00.000Z\"}\n";
         let next_request = "{\"type\":\"api-request\",\"id\":\"req-2\",\"timestamp\":\"2026-10-23T03:00:01.000Z\"}\n";
@@ -510,10 +613,10 @@ mod tests {
         append_file(&claude_file, next_request);
         append_file(&claude_file, next_assistant);
 
-        assert!(collector.poll_after(0).is_empty());
+        assert!(collector.poll_after(0, 0).events.is_empty());
 
         append_file(&claude_file, "\n");
-        let events = collector.poll_after(0);
+        let events = collector.poll_after(0, 0).events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].output_tokens, 60);
         assert_eq!(events[0].duration_ms, 3_000);

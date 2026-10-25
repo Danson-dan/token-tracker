@@ -26,6 +26,15 @@
             <button class="period-tab" type="button" data-period="7d">7 天</button>
             <button class="period-tab" type="button" data-period="30d">30 天</button>
           </div>
+          <button
+            class="icon-button compact-button"
+            id="compactButton"
+            type="button"
+            title="缩小为 token 图标"
+            aria-label="缩小为 token 图标"
+          >
+            <img src="assets/token-icon.png" alt="" />
+          </button>
           <button class="icon-button" id="settingsButton" type="button" title="电源设置" aria-label="电源设置">
             ⚙
           </button>
@@ -35,7 +44,10 @@
         </div>
       </header>
 
-      <section class="tool-grid" id="toolGrid" aria-label="运行中的智能体"></section>
+      <div class="grid-shell" id="gridShell">
+        <section class="tool-grid" id="toolGrid" aria-label="运行中的智能体"></section>
+        <div class="grid-more" id="gridMore" hidden>还有运行中的工具 · 向下滚动</div>
+      </div>
 
       <section class="empty-state" id="emptyState" hidden>
         <strong id="emptyTitle">当前没有运行中的智能体</strong>
@@ -63,6 +75,24 @@
         <span class="privacy-note">仅统计 token 用量，不读取会话内容</span>
         <span id="updatedAt">等待数据</span>
       </footer>
+
+      <div
+        class="compact-view"
+        id="compactView"
+        role="button"
+        tabindex="0"
+        title="单击展开 · 拖动移动"
+        aria-label="展开 Token Tracker"
+        hidden
+      >
+        <img class="compact-icon" src="assets/token-icon.png" alt="" draggable="false" />
+        <span class="compact-dot" aria-hidden="true"></span>
+        <span class="compact-badge">
+          <span id="compactRate">0.0</span>
+          <span class="compact-unit" id="compactUnit">t/s</span>
+        </span>
+        <span class="compact-expand" aria-hidden="true">⤢</span>
+      </div>
 
       <section class="settings-panel" id="settingsPanel" hidden>
         <div class="settings-head">

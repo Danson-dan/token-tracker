@@ -77,6 +77,18 @@ impl ToolDetector {
         let mut matched = std::collections::HashSet::new();
 
         for line in listing.lines() {
+            // ps 不会给带空格的应用路径加引号，先按完整命令行匹配 .app 包；
+            // 命中应用包的进程不再按可执行文件名推断，避免 CN 版同时命中国际版。
+            let lower_line = line.to_lowercase();
+            if lower_line.contains(".app/") || lower_line.ends_with(".app") {
+                for tool in ToolId::ALL {
+                    if !matched.contains(&tool) && process_matches(tool, line) {
+                        matched.insert(tool);
+                    }
+                }
+                continue;
+            }
+
             let tokens: Vec<&str> = line.split_whitespace().collect();
             let Some(executable) = tokens.first() else {
                 continue;
@@ -177,15 +189,20 @@ fn looks_like_script_path(token: &str) -> bool {
             .any(|extension| token.ends_with(extension))
 }
 
-/// 只对可执行文件名做边界匹配；应用包路径按 .app 目录匹配
+/// 只对可执行文件名做边界匹配；应用包路径按 .app 目录匹配。
+/// 路径位于 .app 内时只按应用包判断，避免 Trae CN 同时命中 Trae、Qoder CN 同时命中 Qoder。
 fn process_matches(tool: ToolId, candidate: &str) -> bool {
     let lower = candidate.to_lowercase();
     let descriptor = tool.descriptor();
 
-    if descriptor.app_bundles.iter().any(|bundle| {
+    let bundle_match = descriptor.app_bundles.iter().any(|bundle| {
         lower.contains(&format!("{}/", bundle.to_lowercase()))
             || lower.contains(&format!("{}\\", bundle.to_lowercase()))
-    }) {
+    });
+    if lower.contains(".app/") || lower.ends_with(".app") {
+        return bundle_match;
+    }
+    if bundle_match {
         return true;
     }
 
@@ -393,8 +410,28 @@ mod tests {
 
         let running = detector.running_from_listing(listing);
         assert!(running.contains(&ToolId::WORK_BUDDY));
-        assert!(running.contains(&ToolId::TRAE));
+        assert!(running.contains(&ToolId::TRAE_CN));
+        assert!(!running.contains(&ToolId::TRAE));
         assert!(running.contains(&ToolId::ZCODE));
+    }
+
+    #[test]
+    fn cn_and_international_apps_do_not_overlap() {
+        let detector = ToolDetector::with_environment(None, Vec::new(), Vec::new());
+        let listing = concat!(
+            "/Applications/Qoder CN.app/Contents/MacOS/Qoder CN\n",
+            "/Applications/Qoder.app/Contents/MacOS/Qoder\n",
+            "/Applications/Trae.app/Contents/MacOS/Electron\n",
+            "/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness\n"
+        );
+
+        let running = detector.running_from_listing(listing);
+        assert!(running.contains(&ToolId::QODER_CN));
+        assert!(running.contains(&ToolId::QODER));
+        assert!(running.contains(&ToolId::TRAE));
+        assert!(!running.contains(&ToolId::TRAE_CN));
+        assert!(running.contains(&ToolId::DEEPSEEK_HARNESS));
+        assert_eq!(running.len(), 4);
     }
 
     #[test]
