@@ -101,7 +101,7 @@
 
 - `README.md`：功能、支持矩阵、工作原理、各数据源 token/耗时口径、状态语义、构建运行、配置路径、电源管理、限制与路线图，已同步 16 工具、WorkBuddy span usage、Qoder 活跃轮次、卡片布局、5 分钟状态时效与紧凑模式启动行为。
 - `RELEASE_NOTES.md`：已生成 `v0.2.0 — 2026-10-25` 条目，v0.1.0 历史版本保持不变。
-- Git 仓库 `main` 分支，远程 `https://github.com/Danson-dan/token-tracker.git`；本轮改动正在提交并推送。
+- Git 仓库 `main` 分支，远程 `https://github.com/Danson-dan/token-tracker.git`；v0.2.0 已在本地提交 `f32c7e9`，推送被凭据阻塞：HTTPS 无 Keychain 凭据（`could not read Username`），本机未安装 `gh`，SSH 公钥 `~/.ssh/id_ed25519` 未被 GitHub 授权。配置 PAT 或授权 SSH 后执行 `git push origin main` 即可。
 - Fine-grained PAT 需要 Repository access 选中该仓库，并把 Contents 设为 Read and write；`Public repositories (read-only)` 只能读取，推送会返回 403。
 
 ## 下一步计划
